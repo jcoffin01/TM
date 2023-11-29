@@ -81,6 +81,58 @@ std::wstring cvtMem(DWORD_PTR memUsed) {
 	return memory.str();
 }
 
+class LargeInteger {
+	ULARGE_INTEGER data;
+public:
+	LargeInteger(FILETIME const& ft) {
+		data.LowPart = ft.dwLowDateTime;
+		data.HighPart = ft.dwHighDateTime;
+	}
+
+	LargeInteger(uint64_t const& d) {
+		data.QuadPart = d;
+	}
+
+	operator uint64_t() const { return data.QuadPart; }
+
+	operator FILETIME() const {
+		FILETIME ret;
+		ret.dwLowDateTime = data.LowPart;
+		ret.dwHighDateTime = data.HighPart;
+		return ret;
+	}
+
+	operator SYSTEMTIME() const {
+		SYSTEMTIME ret;
+		FILETIME ft;
+		ft.dwLowDateTime = data.LowPart;
+		ft.dwHighDateTime = data.HighPart;
+
+		FileTimeToSystemTime(&ft, &ret);
+		return ret;
+	}
+
+	LargeInteger operator+(LargeInteger const& b) const {
+		return LargeInteger(data.QuadPart+b.data.QuadPart);
+	}
+};
+
+CString GetCpuTime(HANDLE pid) {
+	auto process = OpenProcess(PROCESS_QUERY_INFORMATION, false, (DWORD)pid);
+	if (process == NULL)
+		return CString();
+
+	FILETIME createTime, exitTime, kernelTime, userTime;
+
+	GetProcessTimes(process, &createTime, &exitTime, &kernelTime, &userTime);
+	CloseHandle(process);
+
+	SYSTEMTIME t = LargeInteger(kernelTime) + LargeInteger(userTime);
+	CString result;
+	result.Format(L"%d:%d:%d.%3.3d", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+	return result;
+}
+
 void insert(CListCtrl& processes, PSYSTEM_PROCESS_INFORMATION spi, int i=0) {
 	CString imageName(spi->ImageName.Buffer, spi->ImageName.Length);
 	processes.InsertItem(i, spi->ImageName.Buffer);
@@ -92,6 +144,8 @@ void insert(CListCtrl& processes, PSYSTEM_PROCESS_INFORMATION spi, int i=0) {
 
 	processes.SetItemText(i, 2, threadCount.str().c_str());
 	processes.SetItemData(i, (DWORD_PTR)spi->UniqueProcessId);
+	CString cpuTime = GetCpuTime(spi->UniqueProcessId);
+	processes.SetItemText(i, 3, cpuTime);
 }
 
 void CTMView::fill() {
@@ -117,7 +171,7 @@ void CTMView::update() {
 	// Update data for existing items, add new items, delete items that no longer exist
 	if (NT_SUCCESS(status = NtQuerySystemInformation(SystemProcessInformation, spi, 1024 * 1024, NULL))) {
 		int i = 0;
-		while (spi->NextEntryOffset) {
+		for (;;) {
 
 			LVFINDINFOW crit;
 			crit.flags = LVFI_PARAM;
@@ -132,11 +186,13 @@ void CTMView::update() {
 			} else {
 				processes.SetItemText(i, 1, cvtMem(spi->PrivatePageCount).c_str());
 
-				std::wstringstream threadCount;
-				threadCount << spi->NumberOfThreads;
-
-				processes.SetItemText(i, 2, threadCount.str().c_str());
+				auto threadCount = std::to_wstring(spi->NumberOfThreads);
+				processes.SetItemText(i, 2, threadCount.c_str());
+				
+				processes.SetItemText(i, 3, GetCpuTime(spi->UniqueProcessId));
 			}
+			if (spi->NextEntryOffset == 0)
+				break;
 			spi = (PSYSTEM_PROCESS_INFORMATION)((LPBYTE)spi + spi->NextEntryOffset);
 		}
 	}
@@ -157,6 +213,7 @@ void CTMView::OnInitialUpdate()
 	processes.InsertColumn(0, L"Image Name", LVCFMT_LEFT, 300, 0);
 	processes.InsertColumn(1, L"Memory", LVCFMT_LEFT, 100, 1);
 	processes.InsertColumn(2, L"Threads", LVCFMT_LEFT, 80, 2);
+	processes.InsertColumn(3, L"CPU Time", LVCFMT_LEFT, 100, 3);
 	processes.SetExtendedStyle(LVS_EX_FULLROWSELECT);
 
 	fill();
